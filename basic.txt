@@ -1,0 +1,17 @@
+1. the optimised checksum code mark 10 less checksums, than the high time complexity cheksum code
+2. Yes, it does your code already has tol=2 as the default tolerance, meaning it accepts differences up to ±1 (since abs(diff) < 2 means diff can be 0 or 1). But this is implicit and inconsistent. 
+Here's a clear explanation and a clean fix to make tolerance explicit and configurable:
+
+Current behavior
+In vals_match_fast:
+
+return bool((np.abs(target_vals[valid_mask] - total[valid_mask]) < tol).all())
+With tol=2 → accepts |diff| < 2 → so 0 and 1 are accepted, but 2 is not.
+
+This means:
+
+|diff| = 0 ✅ exact match
+
+|diff| = 1 ✅ accepted (rounding difference)
+
+|diff| = 2 ❌ rejected — but tol=2 actually means strictly less than 2

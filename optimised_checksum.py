@@ -3,7 +3,7 @@ import numpy as np
 import os
 from itertools import combinations
 
-# High time complexity Checksum code takes long time than optimised checksum code
+# Optimised and fast way to mark checksum
 
 def build_checksum_str(positions):
     if not positions:
@@ -33,86 +33,67 @@ def is_true(val):
     return False
 
 
+# ─────────────────────────────────────────────────────────────
+# Pre-cache numeric matrix: index → numpy array of year values
+# Built once per fill_checksum call, reused across all rows
+# ─────────────────────────────────────────────────────────────
 def build_numeric_cache(df, year_cols):
-    """Pre-cache all rows as numpy arrays. NaN for non-numeric."""
-    arr = df[year_cols].apply(pd.to_numeric, errors="coerce").values.astype(float)
-    return {idx: arr[pos] for pos, idx in enumerate(df.index)}
+    cache = {}
+    for idx in df.index:
+        vals = pd.to_numeric(df.loc[idx, year_cols], errors="coerce").values.astype(float)
+        cache[idx] = vals  # NaN where non-numeric
+    return cache
 
 
-# ─────────────────────────────────────────────────────────────
-# FAST MATCH: vectorized numpy, no per-combo pandas overhead
-# ─────────────────────────────────────────────────────────────
-def vals_match_fast(numeric_cache, source_indices, target_idx, valid_mask, target_vals, tol=2):
-    total = np.zeros(len(target_vals))
+def vals_match_fast(numeric_cache, source_indices, target_idx, tol=2):
+    """Numpy-based sum check — avoids pandas overhead per call."""
+    target = numeric_cache[target_idx]
+    valid  = ~np.isnan(target)
+    if not valid.any():
+        return False
+
+    total = np.zeros(len(target))
     for i in source_indices:
         src = numeric_cache[i]
-        total += np.where(np.isnan(src), 0.0, src)
-    return bool((np.abs(target_vals[valid_mask] - total[valid_mask]) < tol).all())
+        total += np.where(np.isnan(src), 0, src)
+
+    diffs = np.abs(target[valid] - total[valid])
+    return bool((diffs < tol).all())
 
 
-# ─────────────────────────────────────────────────────────────
-# SUBSET SEARCH — 3 modes based on pool size:
-#
-#  ≤ SMALL_LIMIT  → full combinatorial (handles 1+3+5, 5;8+11)
-#  ≤ LARGE_LIMIT  → contiguous windows O(n²)  
-#  > LARGE_LIMIT  → prefix-sum O(n) sliding window only
-# ─────────────────────────────────────────────────────────────
-SMALL_LIMIT = 15   # full subset search up to this size
-LARGE_LIMIT = 50   # contiguous window up to this size
+COMBO_LIMIT = 15  # full subset search for pools ≤ this size
 
 
-def search_pool(pool, target_idx, numeric_cache, global_to_excel_row,
-                valid_mask, target_vals, tol=2):
+def search_all_subsets(pool, target_idx, numeric_cache, global_to_excel_row, tol=2):
+    """
+    For small pools (≤ COMBO_LIMIT): full combinatorial search, largest first.
+    For large pools (> COMBO_LIMIT): contiguous window search only — O(n²).
+    No redundant re-parsing — uses pre-cached numpy arrays.
+    """
     if not pool:
         return None
     pool = sorted(set(pool))
     n    = len(pool)
 
-    def make_result(indices):
-        return build_checksum_str([global_to_excel_row[i] for i in indices])
-
-    def check(candidates):
-        return vals_match_fast(numeric_cache, candidates, target_idx, valid_mask, target_vals, tol)
-
-    if n <= SMALL_LIMIT:
-        # ── Full subset search: non-contiguous combos like 1+3+5 ──
+    if n <= COMBO_LIMIT:
         for size in range(n, 0, -1):
             for combo in combinations(pool, size):
-                if check(list(combo)):
-                    return make_result(combo)
-
-    elif n <= LARGE_LIMIT:
-        # ── Contiguous windows: O(n²) ──
-        # Build prefix sum matrix for fast range sum
-        mat = np.array([numeric_cache[i] for i in pool])  # shape (n, years)
-        mat_nan0 = np.where(np.isnan(mat), 0.0, mat)
-        prefix = np.vstack([np.zeros((1, mat.shape[1])), np.cumsum(mat_nan0, axis=0)])
-
+                if vals_match_fast(numeric_cache, list(combo), target_idx, tol):
+                    return build_checksum_str([global_to_excel_row[i] for i in combo])
+    else:
+        # Large pool — contiguous windows (financial groups are almost always contiguous)
         for size in range(n, 0, -1):
             for start in range(n - size + 1):
-                total = prefix[start + size] - prefix[start]
-                if bool((np.abs(target_vals[valid_mask] - total[valid_mask]) < tol).all()):
-                    return make_result(pool[start: start + size])
-
-    else:
-        # ── Very large pool: prefix-sum O(n) sliding window ──
-        mat    = np.array([numeric_cache[i] for i in pool])
-        mat_nan0 = np.where(np.isnan(mat), 0.0, mat)
-        prefix = np.vstack([np.zeros((1, mat.shape[1])), np.cumsum(mat_nan0, axis=0)])
-
-        # Try full pool first, then shrink
-        for size in range(n, 0, -1):
-            total = prefix[size] - prefix[0]  # always from start (most common in finance)
-            if bool((np.abs(target_vals[valid_mask] - total[valid_mask]) < tol).all()):
-                return make_result(pool[:size])
+                candidates = pool[start: start + size]
+                if vals_match_fast(numeric_cache, candidates, target_idx, tol):
+                    return build_checksum_str([global_to_excel_row[i] for i in candidates])
 
     return None
 
 
 def find_checksum(df, target_idx, year_cols, global_to_excel_row, numeric_cache, tol=2):
     target_arr = numeric_cache[target_idx]
-    valid_mask = ~np.isnan(target_arr)
-    if not valid_mask.any():
+    if np.all(np.isnan(target_arr)):
         return ""
 
     table_id = df.loc[target_idx, "table_id"]
@@ -125,9 +106,6 @@ def find_checksum(df, target_idx, year_cols, global_to_excel_row, numeric_cache,
     if not all_above:
         return ""
 
-    # Pre-extract these once — passed into search_pool to avoid recompute
-    target_vals = target_arr.copy()
-
     tried = set()
 
     def attempt(pool):
@@ -136,12 +114,9 @@ def find_checksum(df, target_idx, year_cols, global_to_excel_row, numeric_cache,
         if not pool or key in tried:
             return None
         tried.add(key)
-        return search_pool(pool, target_idx, numeric_cache, global_to_excel_row,
-                           valid_mask, target_vals, tol)
+        return search_all_subsets(pool, target_idx, numeric_cache, global_to_excel_row, tol)
 
-    # ══════════════════════════════════════════════════════════════
-    # STAGE 1 — dim_1_name group (P&L, Cash Flow, Balance Sheet)
-    # ══════════════════════════════════════════════════════════════
+    # ── STAGE 1: dim_1_name group ──
     if pd.notna(dim1):
         dim1_rows  = same_table[
             (same_table["dim_1_name"] == dim1) & (same_table.index < target_idx)
@@ -149,32 +124,23 @@ def find_checksum(df, target_idx, year_cols, global_to_excel_row, numeric_cache,
         dim1_false = [i for i in dim1_rows if not is_true(df.loc[i, "comments"])]
         dim1_true  = [i for i in dim1_rows if is_true(df.loc[i, "comments"])]
 
-        # 1a. Detail rows → subtotal
-        r = attempt(dim1_false)
+        r = attempt(dim1_false);                    
         if r is not None: return r
-
-        # 1b. Subtotals → grand total
         r = attempt(dim1_true)
         if r is not None: return r
 
-        # 1c. Detail rows since last subtotal
         if dim1_true:
             last_true  = max(dim1_true)
             since_last = [i for i in dim1_rows if i > last_true]
             r = attempt(since_last)
             if r is not None: return r
-
-            # 1d. Last subtotal + rows since it
             r = attempt(sorted([last_true] + since_last))
             if r is not None: return r
 
-        # 1e. Full dim1 group
         r = attempt(dim1_rows)
         if r is not None: return r
 
-    # ══════════════════════════════════════════════════════════════
-    # STAGE 2 — dim_2_name group (equity columns, segments)
-    # ══════════════════════════════════════════════════════════════
+    # ── STAGE 2: dim_2_name group ──
     if pd.notna(dim2):
         dim2_rows  = same_table[
             (same_table["dim_2_name"] == dim2) & (same_table.index < target_idx)
@@ -186,15 +152,12 @@ def find_checksum(df, target_idx, year_cols, global_to_excel_row, numeric_cache,
             r = attempt(pool)
             if r is not None: return r
 
-    # ══════════════════════════════════════════════════════════════
-    # STAGE 3 — cross-dim (e.g. Total Assets = sum of group subtotals)
-    # ══════════════════════════════════════════════════════════════
+    # ── STAGE 3: cross-dim ──
     true_above  = [i for i in all_above if is_true(df.loc[i, "comments"])]
     false_above = [i for i in all_above if not is_true(df.loc[i, "comments"])]
 
     r = attempt(true_above)
     if r is not None: return r
-
     r = attempt(false_above)
     if r is not None: return r
 
@@ -206,9 +169,7 @@ def find_checksum(df, target_idx, year_cols, global_to_excel_row, numeric_cache,
         r = attempt(sorted(set(true_above[-k:]) | set(ungrouped_false)))
         if r is not None: return r
 
-    # ══════════════════════════════════════════════════════════════
-    # STAGE 4 — entire table above (last resort)
-    # ══════════════════════════════════════════════════════════════
+    # ── STAGE 4: full table above ──
     r = attempt(all_above)
     if r is not None: return r
 
@@ -221,6 +182,7 @@ def fill_checksum(input_file, output_file):
 
     df["comments"] = df["comments"].apply(is_true)
 
+    # Build numeric cache ONCE — reused for every row
     numeric_cache = build_numeric_cache(df, year_cols)
 
     global_to_excel_row = {
