@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quant RI Throughput Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #ffffff; --bg-secondary: #f5f5f4; --bg-tertiary: #f1efe8;
+    --bg-info: #e6f1fb; --bg-success: #eaf3de;
+    --text: #1a1a18; --text-secondary: #5f5e5a; --text-tertiary: #888780;
+    --text-info: #185fa5; --text-success: #3b6d11;
+    --border: rgba(0,0,0,0.12); --border-md: rgba(0,0,0,0.2);
+    --radius-md: 8px; --radius-lg: 12px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#1c1c1a;--bg-secondary:#252523;--bg-tertiary:#2c2c2a;
+      --bg-info:#042c53;--bg-success:#173404;
+      --text:#f0ede6;--text-secondary:#b4b2a9;--text-tertiary:#888780;
+      --text-info:#85b7eb;--text-success:#c0dd97;
+      --border:rgba(255,255,255,0.1);--border-md:rgba(255,255,255,0.18);
+    }
+  }
+  body { font-family: var(--font); background: var(--bg-tertiary); color: var(--text); min-height: 100vh; }
+
+  .topbar {
+    background: var(--bg); border-bottom: 0.5px solid var(--border);
+    padding: 0 2rem; display: flex; align-items: center;
+    justify-content: space-between; height: 56px;
+    position: sticky; top: 0; z-index: 50;
+  }
+  .topbar h1 { font-size: 15px; font-weight: 500; }
+  .topbar p { font-size: 12px; color: var(--text-tertiary); margin-top: 2px; }
+  .topbar-right { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-secondary); }
+
+  .btn {
+    font-size: 12px; padding: 6px 14px; border-radius: var(--radius-md);
+    border: 0.5px solid var(--border-md); cursor: pointer;
+    background: transparent; color: var(--text-secondary);
+    font-family: var(--font); transition: background 0.15s;
+  }
+  .btn:hover { background: var(--bg-secondary); }
+  .btn-blue { background: var(--bg-info); color: var(--text-info); border-color: transparent; font-weight: 500; }
+  .btn-blue:hover { opacity: 0.85; background: var(--bg-info); }
+
+  .spinner {
+    display: none; width: 14px; height: 14px;
+    border: 2px solid var(--border-md); border-top-color: var(--text-info);
+    border-radius: 50%; animation: spin 0.7s linear infinite;
+  }
+  .spinner.active { display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .page { max-width: 1100px; margin: 0 auto; padding: 2rem; }
+
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap: 12px; margin-bottom: 2rem; }
+  .metric { background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--radius-lg); padding: 16px 18px; }
+  .metric-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .metric-value { font-size: 26px; font-weight: 500; }
+  .metric-sub { font-size: 11px; color: var(--text-tertiary); margin-top: 3px; }
+
+  .sheet-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 1.5rem; }
+  .tab {
+    font-size: 12px; padding: 5px 14px; border-radius: 20px;
+    border: 0.5px solid var(--border-md); cursor: pointer;
+    background: transparent; color: var(--text-secondary); font-family: var(--font); transition: all 0.15s;
+  }
+  .tab:hover { background: var(--bg-secondary); }
+  .tab.active { background: var(--bg-info); color: var(--text-info); border-color: transparent; font-weight: 500; }
+  .add-tab {
+    font-size: 12px; padding: 5px 14px; border-radius: 20px;
+    border: 0.5px dashed var(--border-md); cursor: pointer;
+    background: transparent; color: var(--text-tertiary); font-family: var(--font);
+  }
+  .add-tab:hover { color: var(--text-secondary); }
+
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
+  select {
+    font-size: 13px; padding: 7px 10px;
+    border: 0.5px solid var(--border-md); border-radius: var(--radius-md);
+    background: var(--bg); color: var(--text); font-family: var(--font); outline: none;
+  }
+  select:focus { border-color: var(--text-info); }
+
+  .chart-card { background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--radius-lg); padding: 1.25rem 1.5rem; margin-bottom: 2rem; }
+  .chart-title { font-size: 14px; font-weight: 500; margin-bottom: 12px; }
+  .chart-wrap { position: relative; width: 100%; height: 280px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 12px; font-size: 12px; color: var(--text-secondary); }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+
+  .section-title { font-size: 14px; font-weight: 500; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; }
+  .range-label { font-size: 12px; color: var(--text-tertiary); font-weight: 400; }
+
+  .daily-card { background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+  .daily-grid-header {
+    display: grid; font-size: 11px; font-weight: 500;
+    color: var(--text-secondary); padding: 10px 16px;
+    background: var(--bg-secondary); border-bottom: 0.5px solid var(--border);
+  }
+  .daily-grid-row {
+    display: grid; padding: 10px 16px;
+    border-bottom: 0.5px solid var(--border);
+    font-size: 13px; align-items: center;
+  }
+  .daily-grid-row:last-child { border-bottom: none; }
+  .daily-grid-row:hover { background: var(--bg-secondary); }
+  .date-main { font-weight: 500; }
+  .date-day { font-size: 11px; color: var(--text-tertiary); margin-top: 1px; }
+  .total-wrap { text-align: center; }
+  .total-num { font-size: 16px; font-weight: 500; }
+  .total-bar { width: 48px; height: 4px; background: var(--border); border-radius: 2px; margin: 4px auto 0; overflow: hidden; }
+  .total-fill { height: 100%; border-radius: 2px; background: var(--text-tertiary); }
+
+  .empty { padding: 3rem; text-align: center; color: var(--text-tertiary); font-size: 13px; line-height: 1.8; }
+  .error-banner {
+    background: #fdf0f0; border: 0.5px solid #f5b8b8; border-radius: var(--radius-md);
+    padding: 12px 16px; margin-bottom: 1rem; font-size: 13px; color: #a03030;
+  }
+
+  /* Modal */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 200; align-items: center; justify-content: center; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: var(--bg); border-radius: var(--radius-lg); border: 0.5px solid var(--border); padding: 1.75rem; width: 560px; max-width: 95vw; }
+  .modal h3 { font-size: 16px; font-weight: 500; margin-bottom: 1.25rem; }
+  .fg { margin-bottom: 14px; }
+  .fg label { font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 5px; }
+  .fg input {
+    width: 100%; font-size: 13px; padding: 8px 10px;
+    border: 0.5px solid var(--border-md); border-radius: var(--radius-md);
+    background: var(--bg); color: var(--text); font-family: var(--font); outline: none;
+  }
+  .fg input:focus { border-color: var(--text-info); }
+  .hint { font-size: 11px; color: var(--text-tertiary); margin-top: 5px; line-height: 1.6; }
+  .modal-btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 1.25rem; }
+  .sli { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; border-bottom: 0.5px solid var(--border); }
+  .sli:last-child { border-bottom: none; }
+  .sli-name { font-size: 13px; font-weight: 500; }
+  .sli-url { font-size: 11px; color: var(--text-tertiary); max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .del-btn { font-size: 11px; color: #e24b4a; border: none; background: transparent; cursor: pointer; padding: 3px 7px; border-radius: 4px; font-family: var(--font); white-space: nowrap; }
+  .del-btn:hover { background: #fcebeb; }
+  .auto-badge { font-size: 11px; padding: 3px 10px; border-radius: 20px; background: var(--bg-secondary); color: var(--text-tertiary); }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div>
+    <h1>Quant RI Throughput Dashboard</h1>
+    <p>Tables completed per analyst, per day — SharePoint connected</p>
+  </div>
+  <div class="topbar-right">
+    <span id="last-refresh">Not refreshed yet</span>
+    <div class="spinner" id="spinner"></div>
+    <span class="auto-badge">Auto-refresh: 5 min</span>
+    <button class="btn" onclick="refreshAll()">↻ Refresh</button>
+    <button class="btn btn-blue" onclick="openModal()">+ Add sheet</button>
+  </div>
+</div>
+
+<div class="page">
+  <div id="error-area"></div>
+
+  <div class="metrics">
+    <div class="metric"><div class="metric-label">Total completed</div><div class="metric-value" id="m-total">0</div><div class="metric-sub">all time</div></div>
+    <div class="metric"><div class="metric-label">Today</div><div class="metric-value" id="m-today">0</div><div class="metric-sub" id="m-today-date">—</div></div>
+    <div class="metric"><div class="metric-label">This week</div><div class="metric-value" id="m-week">0</div><div class="metric-sub">last 7 days</div></div>
+    <div class="metric"><div class="metric-label">Quant RIs</div><div class="metric-value" id="m-ris">0</div><div class="metric-sub">active analysts</div></div>
+    <div class="metric"><div class="metric-label">Sheets tracked</div><div class="metric-value" id="m-sheets">0</div><div class="metric-sub">connected</div></div>
+  </div>
+
+  <div class="sheet-row" id="sheet-tabs"></div>
+
+  <div class="controls">
+    <select id="filter-ri" onchange="renderAll()"><option value="all">All Quant RIs</option></select>
+    <select id="filter-days" onchange="renderAll()">
+      <option value="30">Last 30 days</option>
+      <option value="14">Last 14 days</option>
+      <option value="7">Last 7 days</option>
+      <option value="all">All time</option>
+    </select>
+  </div>
+
+  <div class="chart-card">
+    <div class="chart-title">Daily completions over time</div>
+    <div class="legend" id="chart-legend"></div>
+    <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
+  </div>
+
+  <div>
+    <div class="section-title">
+      Tables completed per day
+      <span class="range-label" id="range-label"></span>
+    </div>
+    <div class="daily-card" id="daily-card">
+      <div class="empty">
+        Click <strong>↻ Refresh</strong> to load data from SharePoint.<br>
+        First time: a browser window will open asking you to sign in with your Office 365 account.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add sheet modal -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <h3>Add SharePoint transition sheet</h3>
+    <div class="fg">
+      <label>Sheet name</label>
+      <input type="text" id="new-name" placeholder="e.g. Jeronimo Martins Group">
+    </div>
+    <div class="fg">
+      <label>SharePoint file URL</label>
+      <input type="text" id="new-url" placeholder="https://yourcompany.sharepoint.com/sites/.../file.xlsx">
+      <div class="hint">
+        Go to your SharePoint → open the Excel file → copy the URL from the browser address bar.<br>
+        The file must be a <strong>.xlsx</strong> Excel file (not a CSV).<br>
+        Your account must have at least <strong>read access</strong> to the file.
+      </div>
+    </div>
+    <div id="sheet-list-wrap" style="display:none;margin-top:1.25rem">
+      <div style="font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:8px">Connected sheets</div>
+      <div id="sheet-list"></div>
+    </div>
+    <div class="modal-btns">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-blue" onclick="addSheet()">Add sheet</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const COLORS = ['#185FA5','#3B6D11','#854F0B','#993C1D','#534AB7','#0F6E56','#993556','#BA7517'];
+const API = 'http://localhost:5050/api';
+
+let allRows     = [];
+let sheetsConf  = [];
+let activeSheet = 'all';
+let chart       = null;
+
+// ── API calls ───────────────────────────────────────────────────────────────
+async function apiGet(path) {
+  const r = await fetch(API + path); return r.json();
+}
+async function apiPost(path, body) {
+  const r = await fetch(API + path, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  return r.json();
+}
+async function apiDelete(path) {
+  const r = await fetch(API + path, { method:'DELETE' }); return r.json();
+}
+
+function showError(msg) {
+  document.getElementById('error-area').innerHTML =
+    '<div class="error-banner">⚠ ' + esc(msg) + '</div>';
+  setTimeout(() => { document.getElementById('error-area').innerHTML = ''; }, 8000);
+}
+
+// ── Bootstrap ───────────────────────────────────────────────────────────────
+async function init() {
+  sheetsConf = await apiGet('/sheets');
+  allRows    = await apiGet('/data');
+  renderTabs();
+  renderAll();
+}
+
+// ── Modal ───────────────────────────────────────────────────────────────────
+function openModal()  { renderSheetList(); document.getElementById('modal').classList.add('open'); }
+function closeModal() { document.getElementById('modal').classList.remove('open'); }
+
+function renderSheetList() {
+  const wrap = document.getElementById('sheet-list-wrap');
+  const el   = document.getElementById('sheet-list');
+  if (!sheetsConf.length) { wrap.style.display='none'; return; }
+  wrap.style.display = 'block';
+  el.innerHTML = sheetsConf.map(s =>
+    '<div class="sli"><div><div class="sli-name">'+esc(s.name)+'</div><div class="sli-url">'+esc(s.url)+'</div></div>' +
+    '<button class="del-btn" onclick="removeSheet(\''+esc(s.name)+'\')">✕ Remove</button></div>'
+  ).join('');
+}
+
+async function addSheet() {
+  const name = document.getElementById('new-name').value.trim();
+  const url  = document.getElementById('new-url').value.trim();
+  if (!name) { alert('Enter a sheet name.'); return; }
+  if (!url)  { alert('Enter the SharePoint URL.'); return; }
+  await apiPost('/sheets', { name, url });
+  document.getElementById('new-name').value = '';
+  document.getElementById('new-url').value  = '';
+  sheetsConf = await apiGet('/sheets');
+  renderSheetList();
+  renderTabs();
+  closeModal();
+  await refreshAll();
+}
+
+async function removeSheet(name) {
+  if (!confirm('Remove "' + name + '"?')) return;
+  await apiDelete('/sheets/' + encodeURIComponent(name));
+  sheetsConf = await apiGet('/sheets');
+  allRows    = await apiGet('/data');
+  if (activeSheet !== 'all' && !sheetsConf.find(s => s.name === activeSheet)) activeSheet = 'all';
+  renderSheetList(); renderTabs(); renderAll();
+}
+
+// ── Refresh ─────────────────────────────────────────────────────────────────
+async function refreshAll() {
+  const sp = document.getElementById('spinner');
+  sp.classList.add('active');
+  try {
+    const result = await apiPost('/refresh', {});
+    if (result.errors && result.errors.length) {
+      result.errors.forEach(e => showError(e.sheet + ': ' + e.error));
+    }
+    allRows = await apiGet('/data');
+    document.getElementById('last-refresh').textContent =
+      'Updated ' + new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+    renderAll();
+  } catch(e) {
+    showError('Could not reach server. Is server.py running?');
+  } finally {
+    sp.classList.remove('active');
+  }
+}
+
+// ── Tabs ─────────────────────────────────────────────────────────────────────
+function renderTabs() {
+  document.getElementById('sheet-tabs').innerHTML =
+    '<button class="tab '+(activeSheet==='all'?'active':'')+'" onclick="setSheet(\'all\')">All sheets</button>' +
+    sheetsConf.map(s=>'<button class="tab '+(activeSheet===s.name?'active':'')+'" onclick="setSheet(\''+esc(s.name)+'\')">'+esc(s.name)+'</button>').join('') +
+    '<button class="add-tab" onclick="openModal()">+ Add sheet</button>';
+  document.getElementById('m-sheets').textContent = sheetsConf.length;
+}
+
+function setSheet(name) { activeSheet = name; renderTabs(); renderAll(); }
+
+// ── Data helpers ──────────────────────────────────────────────────────────────
+function getBaseRows() {
+  if (activeSheet === 'all') return allRows;
+  return allRows.filter(r => r.sheet === activeSheet);
+}
+function getFilteredRows() {
+  let rows = getBaseRows();
+  const ri   = document.getElementById('filter-ri').value;
+  const days = document.getElementById('filter-days').value;
+  if (ri !== 'all') rows = rows.filter(r => r.ri === ri);
+  if (days !== 'all') {
+    const cut = new Date(Date.now() - days*864e5).toISOString().slice(0,10);
+    rows = rows.filter(r => r.date >= cut);
+  }
+  return rows;
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function renderMetrics() {
+  const rows = getBaseRows();
+  document.getElementById('m-total').textContent = rows.length;
+  const today = new Date().toISOString().slice(0,10);
+  document.getElementById('m-today').textContent = rows.filter(r=>r.date===today).length;
+  document.getElementById('m-today-date').textContent = fmtDate(today);
+  const weekAgo = new Date(Date.now()-7*864e5).toISOString().slice(0,10);
+  document.getElementById('m-week').textContent = rows.filter(r=>r.date>=weekAgo).length;
+  document.getElementById('m-ris').textContent = new Set(rows.map(r=>r.ri).filter(Boolean)).size;
+}
+
+function populateRIFilter() {
+  const ris = [...new Set(getBaseRows().map(r=>r.ri).filter(Boolean))].sort();
+  const el  = document.getElementById('filter-ri');
+  const cur = el.value;
+  el.innerHTML = '<option value="all">All Quant RIs</option>' +
+    ris.map(r=>'<option value="'+esc(r)+'">'+esc(r)+'</option>').join('');
+  if (ris.includes(cur)) el.value = cur;
+}
+
+function renderChart(rows) {
+  const ris   = [...new Set(rows.map(r=>r.ri).filter(Boolean))].sort();
+  const dates = [...new Set(rows.map(r=>r.date).filter(Boolean))].sort();
+  document.getElementById('chart-legend').innerHTML = ris.map((ri,i)=>
+    '<span><span class="legend-dot" style="background:'+COLORS[i%COLORS.length]+'"></span>'+esc(ri)+'</span>'
+  ).join('');
+  const datasets = ris.map((ri,i)=>({
+    label: ri,
+    data: dates.map(d=>rows.filter(r=>r.date===d&&r.ri===ri).length),
+    borderColor: COLORS[i%COLORS.length], backgroundColor: COLORS[i%COLORS.length]+'22',
+    tension: 0.3, fill: false, pointRadius: 4, pointHoverRadius: 6,
+  }));
+  const ctx = document.getElementById('trendChart').getContext('2d');
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: dates.map(d=>{const p=d.split('-');return p[2]+'/'+p[1];}), datasets },
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{ticks:{autoSkip:true,maxRotation:45,font:{size:11}},grid:{color:'rgba(128,128,128,0.07)'}},
+        y:{ticks:{stepSize:1,font:{size:11}},grid:{color:'rgba(128,128,128,0.07)'},beginAtZero:true},
+      },
+    },
+  });
+}
+
+function renderDailyTable(rows) {
+  const card = document.getElementById('daily-card');
+  const dateMap = {};
+  rows.forEach(r => {
+    if (!r.date) return;
+    if (!dateMap[r.date]) dateMap[r.date] = {};
+    const ri = r.ri || 'unknown';
+    dateMap[r.date][ri] = (dateMap[r.date][ri] || 0) + 1;
+  });
+  const dates  = Object.keys(dateMap).sort().reverse();
+  const allRIs = [...new Set(rows.map(r=>r.ri).filter(Boolean))].sort();
+  if (!dates.length) {
+    card.innerHTML = '<div class="empty">No completed entries in this range.</div>';
+    document.getElementById('range-label').textContent = '';
+    return;
+  }
+  const oldest = dates[dates.length-1], newest = dates[0];
+  document.getElementById('range-label').textContent =
+    oldest===newest ? fmtDate(oldest) : fmtDate(oldest)+' → '+fmtDate(newest);
+  const maxTotal = Math.max(...dates.map(d=>Object.values(dateMap[d]).reduce((a,b)=>a+b,0)));
+  const riColor = {}; allRIs.forEach((ri,i)=>{ riColor[ri]=COLORS[i%COLORS.length]; });
+  const cols = '140px ' + allRIs.map(()=>'1fr').join(' ') + ' 90px';
+  const header = '<div class="daily-grid-header" style="grid-template-columns:'+cols+'">' +
+    '<span>Date</span>' +
+    allRIs.map((ri,i)=>'<span style="text-align:center;color:'+COLORS[i%COLORS.length]+'">'+esc(ri)+'</span>').join('') +
+    '<span style="text-align:center">Total</span></div>';
+  const body = dates.map(d => {
+    const total = Object.values(dateMap[d]).reduce((a,b)=>a+b,0);
+    const pct   = maxTotal ? Math.round(total/maxTotal*100) : 0;
+    return '<div class="daily-grid-row" style="grid-template-columns:'+cols+'">' +
+      '<div><div class="date-main">'+fmtDate(d)+'</div><div class="date-day">'+fmtDay(d)+'</div></div>' +
+      allRIs.map(ri => {
+        const n = dateMap[d][ri]||0;
+        return n>0
+          ? '<div style="text-align:center"><span style="display:inline-block;background:'+riColor[ri]+'18;color:'+riColor[ri]+';border-radius:6px;padding:3px 10px;font-size:14px;font-weight:500">'+n+'</span></div>'
+          : '<div style="text-align:center;color:var(--text-tertiary)">—</div>';
+      }).join('') +
+      '<div class="total-wrap"><div class="total-num">'+total+'</div><div class="total-bar"><div class="total-fill" style="width:'+pct+'%"></div></div></div>' +
+      '</div>';
+  }).join('');
+  card.innerHTML = header + body;
+}
+
+function renderAll() {
+  renderMetrics();
+  populateRIFilter();
+  const rows = getFilteredRows();
+  renderChart(rows);
+  renderDailyTable(rows);
+}
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function fmtDate(d) { try { return new Date(d+'T00:00:00').toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}); } catch(e){return d;} }
+function fmtDay(d)  { try { return new Date(d+'T00:00:00').toLocaleDateString('en-GB',{weekday:'short'}); } catch(e){return '';} }
+
+init();
+setInterval(refreshAll, 5 * 60 * 1000);
+</script>
+</body>
+</html>
