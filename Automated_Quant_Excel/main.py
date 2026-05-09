@@ -4,8 +4,10 @@
 # ============================================================
 # HOW TO CONNECT ABBYY CLOUD OCR SDK:
 # 1. Go to https://cloud.ocrsdk.com and sign in / register
-# 2. Create a new Application → you get Application ID + Password
-# 3. Paste them in the config section below
+# 2. Create a new Application → note Application ID + Password
+# 3. In your app details, note the "Processing Location" URL
+#    e.g. https://cloud-westus.ocrsdk.com
+# 4. Paste credentials and the FULL location URL below
 #
 # HOW TO GET GEMINI API KEY:
 # 1. Go to https://aistudio.google.com/app/apikey
@@ -29,15 +31,19 @@ from pathlib import Path
 # ============================================================
 # CONFIGURATION — FILL THESE IN
 # ============================================================
-ABBYY_APP_ID       = "YOUR_ABBYY_APPLICATION_ID"
-ABBYY_APP_PASSWORD = "YOUR_ABBYY_APPLICATION_PASSWORD"
-ABBYY_SERVICE_URL  = "https://cloud.ocrsdk.com"
+# ABBYY_APP_ID       = "2bb07070-ed65-458a-8d16-30c5a28a822a"
+# ABBYY_APP_PASSWORD = "F54fhXD9+WoQ1OO6PPb6iHMf"
 
-GEMINI_API_KEY     = "YOUR_GEMINI_API_KEY"
-GEMINI_MODEL       = "gemini-2.0-flash"
+# ⚠️  IMPORTANT: Use the region-specific URL from your ABBYY app details page.
+# NOT https://cloud.ocrsdk.com — that's only the portal login.
+# Examples: https://cloud-westus.ocrsdk.com  |  https://cloud-eu.ocrsdk.com
+# ABBYY_SERVICE_URL  = "https://cloud-westus.ocrsdk.com"
+
+# GEMINI_API_KEY     = "AIzaSyCK4AO3TDOIsqZImB36nKH41PLxKmnKX7k"
+GEMINI_MODEL       = "gemini-2.5-flash"
 
 # Path to your PDF
-PDF_PATH           = str(Path.home() / "Downloads" / "xyz_financial_2025.pdf")
+PDF_PATH           = str(Path.home() / "Downloads" / "2024_Budimex_Group.pdf")
 
 # Output Excel path
 OUTPUT_EXCEL       = str(Path.home() / "Downloads" / "xyz_financial_output.xlsx")
@@ -122,7 +128,7 @@ RULES:
 # GEMINI HELPER
 # ============================================================
 def call_gemini(prompt: str) -> str:
-    """Call Gemini API using google-genai SDK and return clean text."""
+    """Call Gemini API and return clean JSON text."""
     client   = genai.Client(api_key=GEMINI_API_KEY)
     response = client.models.generate_content(
         model    = GEMINI_MODEL,
@@ -137,62 +143,143 @@ def call_gemini(prompt: str) -> str:
 
 # ============================================================
 # STEP 1: ABBYY CLOUD OCR — SUBMIT PDF
+# Supported exportFormat values: txt, xml, docx, xlsx, rtf, pptx, pdf, pdfa
+# "json" is NOT a valid ABBYY export format — we use "xml" and parse it
 # ============================================================
 def abbyy_submit_pdf(pdf_path: str) -> str:
+    """Upload PDF to ABBYY Cloud OCR. Returns task ID."""
     print(f"[ABBYY] Submitting PDF: {pdf_path}")
-    url    = f"{ABBYY_SERVICE_URL}/processDocument"
+
+    url    = f"{ABBYY_SERVICE_URL}/processImage"
     params = {
-        "exportFormat": "json",
+        "exportFormat": "xml",          # xml gives full structured text output
         "language":     "English",
         "profile":      "documentArchiving",
-        "pdfPassword":  ""
     }
+
     with open(pdf_path, "rb") as f:
         response = requests.post(
             url,
             params  = params,
-            data    = f,
-            headers = {"Content-Type": "application/octet-stream"},
+            files   = {"file": (Path(pdf_path).name, f, "application/pdf")},
             auth    = (ABBYY_APP_ID, ABBYY_APP_PASSWORD)
         )
+
     if response.status_code != 200:
         raise Exception(f"ABBYY submit failed: {response.status_code} — {response.text}")
+
+    # ABBYY returns XML: <response><task id="..." status="Queued" .../></response>
     root    = ET.fromstring(response.text)
-    task_id = root.attrib.get("id") or root.find(".//{*}task").attrib["id"]
+    task    = root.find("task")          # direct child named "task"
+    if task is None:
+        task = root                      # fallback: root itself carries attribs
+    task_id = task.attrib.get("id")
+    if not task_id:
+        raise Exception(f"ABBYY: could not find task ID in response:\n{response.text}")
+
     print(f"[ABBYY] Task ID: {task_id}")
     return task_id
 
 # ============================================================
-# STEP 2: ABBYY — POLL UNTIL DONE
+# STEP 2: ABBYY — POLL UNTIL DONE, DOWNLOAD XML, RETURN AS TEXT
+# ABBYY says: poll every 2–3 seconds, no auth needed for resultUrl download
 # ============================================================
-def abbyy_wait_for_result(task_id: str, poll_interval: int = 5) -> dict:
+def abbyy_wait_for_result(task_id: str, poll_interval: int = 3) -> str:
+    """
+    Poll ABBYY until task completes.
+    Downloads the XML result and converts it to plain text for Gemini.
+    Returns: plain text string of the full document.
+    """
     print(f"[ABBYY] Waiting for task {task_id}...")
+
     while True:
         response = requests.get(
             f"{ABBYY_SERVICE_URL}/getTaskStatus",
             params = {"taskId": task_id},
             auth   = (ABBYY_APP_ID, ABBYY_APP_PASSWORD)
         )
+
+        if response.status_code != 200:
+            raise Exception(f"ABBYY status check failed: {response.status_code} — {response.text}")
+
         root   = ET.fromstring(response.text)
-        task   = root.find(".//{*}task") or root
+        task   = root.find("task")       # <response><task .../></response>
+        if task is None:
+            task = root
         status = task.attrib.get("status", "")
         print(f"[ABBYY] Status: {status}")
+
         if status == "Completed":
             result_url = task.attrib.get("resultUrl")
-            print(f"[ABBYY] Done! Downloading result...")
-            return requests.get(result_url).json()  # no auth for result download
-        elif status in ("ProcessingFailed", "NotEnoughCredits"):
-            raise Exception(f"ABBYY failed: {status}")
+            if not result_url:
+                raise Exception("ABBYY completed but no resultUrl in response.")
+            print("[ABBYY] Done! Downloading OCR result...")
+
+            # No auth headers for result download — ABBYY requirement
+            xml_response = requests.get(result_url)
+            xml_response.raise_for_status()
+
+            # Parse ABBYY XML → extract all text blocks as plain text
+            ocr_text = _abbyy_xml_to_text(xml_response.text)
+            print(f"[ABBYY] Extracted {len(ocr_text)} characters of text.")
+            return ocr_text
+
+        if status in ("ProcessingFailed", "NotEnoughCredits"):
+            raise Exception(f"ABBYY processing failed with status: {status}")
+
         time.sleep(poll_interval)
+
+def _abbyy_xml_to_text(xml_string: str) -> str:
+    """
+    Parse ABBYY output XML and extract all text in reading order.
+    ABBYY XML structure: document → page → block → text → par → line → formatting → charParams
+    We collect all <line> text joined by newlines, blocks separated by double newlines.
+    """
+    try:
+        root = ET.fromstring(xml_string)
+    except ET.ParseError:
+        # If XML is malformed, return raw text stripped of tags as fallback
+        import re
+        return re.sub(r"<[^>]+>", " ", xml_string)
+
+    ns = ""
+    # Detect namespace if present
+    if root.tag.startswith("{"):
+        ns = root.tag.split("}")[0] + "}"
+
+    pages_text = []
+    page_num   = 0
+
+    for page in root.iter(f"{ns}page"):
+        page_num += 1
+        page_lines = [f"\n--- PAGE {page_num} ---"]
+
+        for block in page.iter(f"{ns}block"):
+            block_lines = []
+            for line in block.iter(f"{ns}line"):
+                # Collect all charParams text in this line
+                chars = "".join(
+                    (cp.text or "")
+                    for cp in line.iter(f"{ns}charParams")
+                )
+                if chars.strip():
+                    block_lines.append(chars.strip())
+            if block_lines:
+                page_lines.append("\n".join(block_lines))
+                page_lines.append("")  # blank line between blocks
+
+        pages_text.append("\n".join(page_lines))
+
+    return "\n".join(pages_text)
 
 # ============================================================
 # STEP 3A: GEMINI — FRESH PDF
 # ============================================================
-def gemini_extract_fresh(abbyy_json: dict) -> dict:
+def gemini_extract_fresh(ocr_text: str) -> dict:
     """
-    Gemini reads ABBYY output, detects all tables, auto-detects
-    table_id from title, years from table headers, base_factor/unit/unit_type
-    from context text near each table, and returns flat row schema.
+    Send extracted OCR text to Gemini.
+    Gemini identifies tables, assigns IDs, detects statement types,
+    year columns, base_factor/unit/unit_type, and returns flat row schema.
     """
     print("[GEMINI] Fresh extraction mode...")
 
@@ -201,8 +288,8 @@ You are a financial document analysis expert.
 
 Company: {COMPANY_NAME}
 
-RAW ABBYY OCR JSON (full document):
-{json.dumps(abbyy_json, indent=2)[:50000]}
+FULL DOCUMENT TEXT (extracted via OCR from financial PDF):
+{ocr_text[:50000]}
 
 Your tasks — follow ALL rules below EXACTLY:
 {EXCEL_RULES}
@@ -274,12 +361,12 @@ The "rows" must have keys for each year in year_columns.
 # 2. Set EXISTING_EXCEL = "path/to/your/previous.xlsx" above
 # 3. The pipeline auto-switches when EXISTING_EXCEL is set
 #
-# def gemini_extract_update(abbyy_json: dict, existing_excel_path: str) -> dict:
+# def gemini_extract_update(ocr_text: str, existing_excel_path: str) -> dict:
 #     """
 #     YoY Update:
 #     - Reads existing Excel (previous years)
-#     - Matches metrics from new PDF — handles renamed metrics intelligently
-#     - Adds new year as a new column (only that year — no extra columns)
+#     - Matches metrics from new PDF intelligently (handles renamed metrics)
+#     - Adds new year as a new column only (no extra columns added)
 #     - Adds new rows for new metrics, keeps removed metrics with empty new-year value
 #     - Preserves ALL existing Table IDs and historical year columns untouched
 #     """
@@ -293,18 +380,12 @@ The "rows" must have keys for each year in year_columns.
 #         ]
 #     prompt = f"""
 # You are a financial document analysis expert specializing in year-on-year comparisons.
-#
 # Company: {COMPANY_NAME}
-#
 # EXISTING EXCEL DATA (historical — DO NOT modify these columns or values):
 # {json.dumps(existing_data, indent=2)[:20000]}
-#
-# NEW ABBYY OCR JSON (new year PDF):
-# {json.dumps(abbyy_json, indent=2)[:30000]}
-#
-# Rules:
-# {EXCEL_RULES}
-#
+# NEW OCR TEXT (from new year PDF):
+# {ocr_text[:30000]}
+# Rules: {EXCEL_RULES}
 # Additional YoY rules:
 # - Detect which new year is in the new PDF (e.g. 2025)
 # - Add ONLY that new year as a new column
@@ -313,7 +394,6 @@ The "rows" must have keys for each year in year_columns.
 # - Metrics removed in new PDF → keep row, leave new year column empty
 # - Preserve ALL existing Table IDs — only new tables get new IDs
 # - base_factor, unit, unit_type — re-detect from new PDF context (may have changed)
-#
 # Return ONLY valid JSON in same format as fresh extraction. No text outside JSON.
 # """
 #     raw = call_gemini(prompt)
@@ -344,7 +424,6 @@ def write_excel(structured_data: dict, output_path: str):
     tables       = structured_data.get("tables", [])
     summary_rows = []
 
-    # Fixed columns (non-year)
     FIXED_COLS = [
         "primary_key", "date_last_updated", "doc_page_num", "file_page_num", "table_id",
         "geo_1_id", "geo_1_name", "geo_1_type", "geo_2_id", "geo_2_name", "geo_2_type",
@@ -363,13 +442,11 @@ def write_excel(structured_data: dict, output_path: str):
         year_cols  = [str(y) for y in table.get("year_columns", [])]
         rows       = table["rows"]
 
-        # Final column order: fixed + only the years in this table
         ALL_COLS   = FIXED_COLS + year_cols
-
         sheet_name = f"{table_id}"[:31]
         ws         = wb.create_sheet(title=sheet_name)
 
-        # Row 1 — Header row
+        # Row 1 — Header
         for ci, col in enumerate(ALL_COLS, 1):
             cell           = ws.cell(row=1, column=ci, value=col)
             cell.fill      = HEADER_FILL
@@ -377,9 +454,9 @@ def write_excel(structured_data: dict, output_path: str):
             cell.alignment = CENTER
             cell.border    = THIN_BORDER
 
-        # Row 2+ — Data rows
+        # Row 2+ — Data
         for ri, row in enumerate(rows, 2):
-            row["date_last_updated"] = today   # auto-fill today's date
+            row["date_last_updated"] = today
             fill = ALT_FILL if ri % 2 == 0 else PatternFill()
 
             for ci, col in enumerate(ALL_COLS, 1):
@@ -393,7 +470,6 @@ def write_excel(structured_data: dict, output_path: str):
                     cell.alignment = LEFT
                 elif col in year_cols:
                     cell.alignment = RIGHT
-                    # Detect and colour negatives
                     try:
                         num = float(str(val).replace(",", "")) if val != "" else None
                         if num is not None and num < 0:
@@ -407,7 +483,6 @@ def write_excel(structured_data: dict, output_path: str):
 
         ws.freeze_panes = "A2"
 
-        # Auto-fit columns
         for col in ws.columns:
             max_len = max((len(str(c.value or "")) for c in col), default=10)
             ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 2, 40)
@@ -424,7 +499,7 @@ def write_excel(structured_data: dict, output_path: str):
             "unit_type":   table.get("unit_type", ""),
         })
 
-    # — Summary sheet —
+    # Summary sheet
     ws_s = wb.create_sheet(title="SUMMARY", index=0)
     ws_s["A1"] = f"Financial Report — {structured_data.get('company', '')} | Extracted: {today}"
     ws_s["A1"].font = Font(bold=True, size=13, color="1F3864")
@@ -441,8 +516,8 @@ def write_excel(structured_data: dict, output_path: str):
                 row["sheet_name"], row["row_count"], row["base_factor"], row["unit"], row["unit_type"]]
         fill = ALT_FILL if ri % 2 == 0 else PatternFill()
         for ci, val in enumerate(vals, 1):
-            cell       = ws_s.cell(row=ri, column=ci, value=val)
-            cell.fill  = fill
+            cell        = ws_s.cell(row=ri, column=ci, value=val)
+            cell.fill   = fill
             cell.border = THIN_BORDER
 
     for col in ws_s.columns:
@@ -461,14 +536,19 @@ def main():
     print("FINANCIAL PDF → EXCEL PIPELINE")
     print("=" * 60)
 
-    task_id      = abbyy_submit_pdf(PDF_PATH)
-    abbyy_result = abbyy_wait_for_result(task_id)
 
+    # Step 1 — Upload PDF to ABBYY
+    task_id  = abbyy_submit_pdf(PDF_PATH)
+
+    # Step 2 — Poll until done, get plain text
+    ocr_text = abbyy_wait_for_result(task_id)
+
+    # Step 3 — Gemini extracts structured data
     if EXISTING_EXCEL is None:
-        structured_data = gemini_extract_fresh(abbyy_result)
+        structured_data = gemini_extract_fresh(ocr_text)
     else:
-        # YoY update mode — uncomment gemini_extract_update() above first
-        # structured_data = gemini_extract_update(abbyy_result, EXISTING_EXCEL)
+        # YoY mode — uncomment gemini_extract_update() above first
+        # structured_data = gemini_extract_update(ocr_text, EXISTING_EXCEL)
         raise NotImplementedError("Uncomment gemini_extract_update() above to use YoY mode")
 
     # Save raw Gemini JSON for debugging
@@ -477,6 +557,7 @@ def main():
         json.dump(structured_data, f, indent=2)
     print(f"[DEBUG] Raw Gemini JSON → {debug_path}")
 
+    # Step 4 — Write to Excel
     write_excel(structured_data, OUTPUT_EXCEL)
 
     print("=" * 60)
