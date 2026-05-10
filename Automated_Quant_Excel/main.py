@@ -40,17 +40,17 @@ from pathlib import Path
 # ABBYY_SERVICE_URL  = "https://cloud-westus.ocrsdk.com"
 
 # GEMINI_API_KEY     = "AIzaSyCK4AO3TDOIsqZImB36nKH41PLxKmnKX7k"
-GEMINI_MODEL       = "gemini-2.5-flash"
+# GEMINI_MODEL       = "gemini-2.5-flash"
 
 # Path to your PDF
-PDF_PATH           = str(Path.home() / "Downloads" / "2024_Budimex_Group.pdf")
+PDF_PATH           = str(Path.home() / "Downloads" / "xyz.pdf")
 
 # Output Excel path
-OUTPUT_EXCEL       = str(Path.home() / "Downloads" / "xyz_financial_output.xlsx")
+OUTPUT_EXCEL       = str(Path.home() / "Downloads" / "xyz_financial_output_updated.xlsx")
 
 # For year-on-year update mode — set path to existing Excel, else leave as None
-# EXISTING_EXCEL   = str(Path.home() / "Downloads" / "xyz_financial_2024.xlsx")
-EXISTING_EXCEL     = None
+EXISTING_EXCEL   = str(Path.home() / "Downloads" / "xyz_financial_output.xlsx")
+# EXISTING_EXCEL     = None
 
 # Company name (used in Gemini prompt)
 COMPANY_NAME       = "XYZ"
@@ -129,16 +129,19 @@ RULES:
 # ============================================================
 def call_gemini(prompt: str) -> str:
     """Call Gemini API and return clean JSON text."""
-    client   = genai.Client(api_key=GEMINI_API_KEY)
-    response = client.models.generate_content(
-        model    = GEMINI_MODEL,
-        contents = prompt
-    )
-    raw = response.text.strip()
+    import urllib.request, urllib.error
+    url  = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    body = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode()
+    req  = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            result = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        raise Exception(f"Gemini error {e.code}: {e.read().decode()}")
+    raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
+        if raw.startswith("json"): raw = raw[4:]
     return raw.strip()
 
 # ============================================================
@@ -361,43 +364,100 @@ The "rows" must have keys for each year in year_columns.
 # 2. Set EXISTING_EXCEL = "path/to/your/previous.xlsx" above
 # 3. The pipeline auto-switches when EXISTING_EXCEL is set
 #
-# def gemini_extract_update(ocr_text: str, existing_excel_path: str) -> dict:
-#     """
-#     YoY Update:
-#     - Reads existing Excel (previous years)
-#     - Matches metrics from new PDF intelligently (handles renamed metrics)
-#     - Adds new year as a new column only (no extra columns added)
-#     - Adds new rows for new metrics, keeps removed metrics with empty new-year value
-#     - Preserves ALL existing Table IDs and historical year columns untouched
-#     """
-#     print("[GEMINI] Year-on-year update mode...")
-#     wb_existing   = load_workbook(existing_excel_path)
-#     existing_data = {}
-#     for sheet_name in wb_existing.sheetnames:
-#         ws = wb_existing[sheet_name]
-#         existing_data[sheet_name] = [
-#             [cell.value for cell in row] for row in ws.iter_rows()
-#         ]
-#     prompt = f"""
-# You are a financial document analysis expert specializing in year-on-year comparisons.
-# Company: {COMPANY_NAME}
-# EXISTING EXCEL DATA (historical — DO NOT modify these columns or values):
-# {json.dumps(existing_data, indent=2)[:20000]}
-# NEW OCR TEXT (from new year PDF):
-# {ocr_text[:30000]}
-# Rules: {EXCEL_RULES}
-# Additional YoY rules:
-# - Detect which new year is in the new PDF (e.g. 2025)
-# - Add ONLY that new year as a new column
-# - Match metrics intelligently (e.g. "Net Revenue" == "Revenue from Operations" → same row)
-# - New metrics in new PDF → add as new rows
-# - Metrics removed in new PDF → keep row, leave new year column empty
-# - Preserve ALL existing Table IDs — only new tables get new IDs
-# - base_factor, unit, unit_type — re-detect from new PDF context (may have changed)
-# Return ONLY valid JSON in same format as fresh extraction. No text outside JSON.
-# """
-#     raw = call_gemini(prompt)
-#     return json.loads(raw)
+def gemini_extract_update(ocr_text: str, existing_excel_path: str) -> dict:
+    """
+    YoY Update:
+    - Reads existing Excel (previous years)
+    - Matches metrics from new PDF intelligently (handles renamed metrics)
+    - Adds new year as a new column only (no extra columns added)
+    - Adds new rows for new metrics, keeps removed metrics with empty new-year value
+    - Preserves ALL existing Table IDs and historical year columns untouched
+    """
+    print("[GEMINI] Year-on-year update mode...")
+    wb_existing   = load_workbook(existing_excel_path)
+    existing_data = {}
+    for sheet_name in wb_existing.sheetnames:
+        ws = wb_existing[sheet_name]
+        existing_data[sheet_name] = [
+            [cell.value for cell in row] for row in ws.iter_rows()
+        ]
+    prompt = f"""
+You are a financial document analysis expert specializing in year-on-year comparisons.
+Company: {COMPANY_NAME}
+EXISTING EXCEL DATA (historical — DO NOT modify these columns or values):
+{json.dumps(existing_data, indent=2)[:20000]}
+NEW OCR TEXT (from new year PDF):
+{ocr_text[:30000]}
+Rules: {EXCEL_RULES}
+Additional YoY rules:
+- Detect which new year is in the new PDF (e.g. 2025)
+- Add ONLY that new year as a new column
+- Match metrics intelligently (e.g. "Net Revenue" == "Revenue from Operations" → same row)
+- New metrics in new PDF → add as new rows
+- Metrics removed in new PDF → keep row, leave new year column empty
+- Preserve ALL existing Table IDs — only new tables get new IDs
+- base_factor, unit, unit_type — re-detect from new PDF context (may have changed)
+Return ONLY valid JSON in same format as fresh extraction. No text outside JSON.
+"""
+    raw = call_gemini(prompt)
+    return json.loads(raw)
+
+# ============================================================
+# CONVERTER — Flat sheet-keyed JSON → tables[] format
+# Gemini YoY mode mirrors the existing Excel structure back,
+# so we need to convert it to the standard tables[] format.
+# ============================================================
+def convert_flat_to_tables(flat_data: dict) -> dict:
+    tables = []
+
+    for sheet_name, sheet_rows in flat_data.items():
+        if sheet_name == "SUMMARY" or not sheet_rows:
+            continue
+
+        headers = [str(h) if h is not None else "" for h in sheet_rows[0]]
+        year_cols = [h for h in headers if h.isdigit() and len(h) == 4]
+
+        first_row = sheet_rows[1] if len(sheet_rows) > 1 else []
+        row_dict  = dict(zip(headers, first_row))
+
+        table_id    = row_dict.get("table_id", sheet_name)
+        page_num    = row_dict.get("doc_page_num", 0) or 0
+        base_factor = row_dict.get("base_factor", 1) or 1
+        disp_power  = row_dict.get("display_power_factor", 0) or 0
+        unit        = row_dict.get("unit", "") or ""
+        unit_type   = row_dict.get("unit_type", "") or ""
+
+        tid = str(table_id).lower()
+        if "balance" in tid or "financial_position" in tid:
+            stmt_type = "BALANCE_SHEET"
+        elif "profit" in tid or "loss" in tid or "income" in tid:
+            stmt_type = "INCOME_STATEMENT"
+        elif "cash" in tid:
+            stmt_type = "CASH_FLOW"
+        elif "equity" in tid:
+            stmt_type = "EQUITY"
+        else:
+            stmt_type = "UNKNOWN"
+
+        rows = []
+        for raw_row in sheet_rows[1:]:
+            row = dict(zip(headers, raw_row))
+            row = {k: (v if v is not None else "") for k, v in row.items()}
+            rows.append(row)
+
+        tables.append({
+            "table_id":             table_id,
+            "statement_type":       stmt_type,
+            "page_number":          int(page_num),
+            "year_columns":         year_cols,
+            "base_factor":          base_factor,
+            "display_power_factor": disp_power,
+            "unit":                 unit,
+            "unit_type":            unit_type,
+            "rows":                 rows,
+        })
+
+    return {"company": COMPANY_NAME, "tables": tables}
 
 # ============================================================
 # STEP 4: WRITE TO EXCEL
@@ -548,8 +608,9 @@ def main():
         structured_data = gemini_extract_fresh(ocr_text)
     else:
         # YoY mode — uncomment gemini_extract_update() above first
-        # structured_data = gemini_extract_update(ocr_text, EXISTING_EXCEL)
-        raise NotImplementedError("Uncomment gemini_extract_update() above to use YoY mode")
+        row_yoy_data = gemini_extract_update(ocr_text, EXISTING_EXCEL)
+        structured_data = convert_flat_to_tables(row_yoy_data)
+        # raise NotImplementedError("Uncomment gemini_extract_update() above to use YoY mode")
 
     # Save raw Gemini JSON for debugging
     debug_path = OUTPUT_EXCEL.replace(".xlsx", "_gemini_raw.json")
